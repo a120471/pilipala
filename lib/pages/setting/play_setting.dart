@@ -120,6 +120,16 @@ class _PlaySettingState extends State<PlaySetting> {
               setKey: SettingBoxKey.autoPiP,
               defaultVal: false,
             ),
+          if (Platform.isAndroid)
+            SetSwitchItem(
+              title: '全屏扩展至挖孔/刘海区域',
+              subTitle: '横屏全屏时画面延伸至摄像头挖孔（小米等机型若未生效请检查系统“凹口屏幕显示”设置）',
+              setKey: SettingBoxKey.enableDisplayCutout,
+              defaultVal: true,
+              callFn: (val) {
+                updateDisplayCutoutMode(val);
+              },
+            ),
           const SetSwitchItem(
             title: '自动全屏',
             subTitle: '视频开始播放时进入全屏',

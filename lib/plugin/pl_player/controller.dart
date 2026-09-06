@@ -2,6 +2,7 @@
 
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:easy_debounce/easy_throttle.dart';
@@ -80,13 +81,122 @@ class PlPlayerController {
   final Rx<bool> _subTitleOpen = false.obs;
   final Rx<int> _subTitleCode = (-1).obs;
   // 默认投稿视频格式
-  static Rx<String> _videoType = 'archive'.obs;
+  static final Rx<String> _videoType = 'archive'.obs;
 
   final Rx<String> _direction = 'horizontal'.obs;
 
   Rx<bool> videoFitChanged = false.obs;
   final Rx<BoxFit> _videoFit = Rx(BoxFit.contain);
   final Rx<String> _videoFitDesc = Rx('包含');
+
+  /// 双指缩放与平移状态
+  final RxDouble _zoomScale = 1.0.obs;
+  final Rx<Offset> _zoomOffset = Rx<Offset>(Offset.zero);
+  final RxBool _isZoomed = false.obs;
+
+  RxDouble get zoomScale => _zoomScale;
+  Rx<Offset> get zoomOffset => _zoomOffset;
+  RxBool get isZoomed => _isZoomed;
+
+  /// 当前选用的缩放策略
+  Rx<VideoScaleStrategy> get scaleStrategy => VideoScaleStrategyManager.currentStrategy;
+
+  /// 最近一次画布(视口)尺寸，用于自动缩放/微调计算
+  Size? lastContainerSize;
+
+  /// 一键自动缩放：按屏幕/画面比例计算消除黑边的最佳缩放（cover 比例），居中。
+  void autoFitZoom() {
+    final double videoAspect = getVideoAspectRatio();
+    final Size cs = lastContainerSize ?? const Size(1920, 1080);
+    if (cs.width <= 0 || cs.height <= 0) return;
+    final double containerAspect = cs.width / cs.height;
+    final double best =
+        math.max(containerAspect / videoAspect, videoAspect / containerAspect);
+    final double value = best.clamp(1.0, 4.0);
+    _zoomScale.value = value;
+    _zoomOffset.value = Offset.zero;
+    _isZoomed.value = value > 1.001;
+  }
+
+  /// 平移精确微调：按步长调整偏移（用于无法用手指精确平移的场景）。
+  void nudgeOffset(Offset step) {
+    if (step.dx == 0 && step.dy == 0) return;
+    final Size cs = lastContainerSize ?? const Size(1920, 1080);
+    final double maxX = cs.width * 0.6;
+    final double maxY = cs.height * 0.6;
+    final Offset v = _zoomOffset.value + step;
+    _zoomOffset.value = Offset(
+      v.dx.clamp(-maxX, maxX),
+      v.dy.clamp(-maxY, maxY),
+    );
+    if (_zoomScale.value > 1.001) _isZoomed.value = true;
+  }
+
+  /// 获取视频实际宽高比，若无法获取则默认 16:9
+  double getVideoAspectRatio() {
+    final int? width = _videoPlayerController?.state.width;
+    final int? height = _videoPlayerController?.state.height;
+    if (width != null && height != null && width > 0 && height > 0) {
+      return width / height;
+    }
+    return 16.0 / 9.0;
+  }
+
+  /// 更新缩放和平移（严格由双指手势调用）
+  void updateZoom(double newScale, Offset newOffset, {Size? containerSize}) {
+    if (containerSize != null) lastContainerSize = containerSize;
+    final double clampedScale = newScale.clamp(1.0, 4.0);
+    _zoomScale.value = clampedScale;
+
+    Offset clampedOffset = newOffset;
+    if (containerSize != null &&
+        containerSize.width > 0 &&
+        containerSize.height > 0) {
+      final double maxOffsetX = containerSize.width * 0.6;
+      final double maxOffsetY = containerSize.height * 0.6;
+      clampedOffset = Offset(
+        newOffset.dx.clamp(-maxOffsetX, maxOffsetX),
+        newOffset.dy.clamp(-maxOffsetY, maxOffsetY),
+      );
+    }
+    _zoomOffset.value = clampedOffset;
+
+    if (clampedScale <= 1.001) {
+      _zoomOffset.value = Offset.zero;
+      _isZoomed.value = false;
+      return;
+    }
+    _isZoomed.value = true;
+  }
+
+  /// 双指操作结束时的平滑处理
+  void onZoomEnd({Size? containerSize}) {
+    if (containerSize != null) lastContainerSize = containerSize;
+    if (_zoomScale.value <= 1.001) {
+      resetZoom();
+      return;
+    }
+    if (containerSize != null &&
+        containerSize.width > 0 &&
+        containerSize.height > 0) {
+      final double maxOffsetX = containerSize.width * 0.6;
+      final double maxOffsetY = containerSize.height * 0.6;
+      _zoomOffset.value = Offset(
+        _zoomOffset.value.dx.clamp(-maxOffsetX, maxOffsetX),
+        _zoomOffset.value.dy.clamp(-maxOffsetY, maxOffsetY),
+      );
+    }
+  }
+
+  /// 复原画幅
+  void resetZoom() {
+    _zoomScale.value = 1.0;
+    _zoomOffset.value = Offset.zero;
+    _isZoomed.value = false;
+  }
+
+  /// 兼容调用：方案B 压缩在 Flutter 管线内完成，切换策略由 Obx 自动触发重建。
+  Future<void> applyScaleShader({Size? containerSize}) async {}
 
   ///
   // ignore: prefer_final_fields

@@ -4,6 +4,21 @@ import 'package:device_info_plus/device_info_plus.dart';
 import 'package:auto_orientation/auto_orientation.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:pilipala/utils/storage.dart';
+
+/// 更新 Android 刘海屏 / 挖孔区显示策略（真全屏时画面延伸到挖孔区）
+Future<void> updateDisplayCutoutMode([bool? enabled]) async {
+  if (!Platform.isAndroid) return;
+  try {
+    final bool val = enabled ??
+        GStrorage.setting
+            .get(SettingBoxKey.enableDisplayCutout, defaultValue: true);
+    const MethodChannel('com.guozhigq.pilipala/cutout')
+        .invokeMethod('setDisplayCutout', {'enable': val});
+  } catch (e) {
+    debugPrint('updateDisplayCutoutMode error: $e');
+  }
+}
 
 //横屏
 Future<void> landScape() async {
