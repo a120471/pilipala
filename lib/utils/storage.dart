@@ -98,6 +98,8 @@ class SettingBoxKey {
       enableShowDanmaku = 'enableShowDanmaku',
       enableBackgroundPlay = 'enableBackgroundPlay',
       fullScreenGestureMode = 'fullScreenGestureMode',
+      // 全屏扩展至挖孔/刘海区域
+      enableDisplayCutout = 'enableDisplayCutout',
 
       /// 隐私
       blackMidsList = 'blackMidsList',

@@ -26,6 +26,7 @@ import 'package:media_kit/media_kit.dart';
 import 'package:pilipala/utils/recommend_filter.dart';
 import 'package:catcher_2/catcher_2.dart';
 import './services/loggeer.dart';
+import 'package:pilipala/plugin/pl_player/utils/fullscreen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -61,6 +62,7 @@ void main() async {
       systemNavigationBarDividerColor: Colors.transparent,
       statusBarColor: Colors.transparent,
     ));
+    updateDisplayCutoutMode();
   }
 
   PiliSchame.init();

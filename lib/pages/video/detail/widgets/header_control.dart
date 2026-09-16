@@ -206,6 +206,25 @@ class _HeaderControlState extends State<HeaderControl> {
                       leading: const Icon(Icons.subtitles_outlined, size: 20),
                       title: const Text('弹幕设置', style: titleStyle),
                     ),
+                    ListTile(
+                      onTap: () {
+                        Get.back();
+                        if (widget.controller != null) {
+                          showScaleStrategyDialog(context, widget.controller!);
+                        }
+                      },
+                      dense: true,
+                      leading: const Icon(Icons.aspect_ratio_rounded, size: 20),
+                      title: const Text('画面缩放与边缘算法', style: titleStyle),
+                      subtitle: Obx(
+                        () => Text(
+                          widget.controller != null
+                              ? widget.controller!.scaleStrategy.value.name
+                              : '自适应压缩',
+                          style: subTitleStyle,
+                        ),
+                      ),
+                    ),
                   ],
                 ),
               ))

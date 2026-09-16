@@ -216,6 +216,10 @@ flutter:
     - assets/images/logo/
     - assets/images/live/
     - assets/images/video/
+  # 视频非线性边缘压缩的 Flutter FragmentShader（方案B：在 Flutter 管线内做压缩，
+  # 同步渲染、坐标精确，可同时根治「双向缩放比例跳变」与「mpv 坐标错位致顶边像素丢失」）。
+  shaders:
+    - lib/plugin/pl_player/render/shaders/video_edge_compress.frag
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/assets-and-images/#resolution-aware
 

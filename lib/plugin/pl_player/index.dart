@@ -12,3 +12,5 @@ export './models/bottom_progress_behavior.dart';
 export './widgets/app_bar_ani.dart';
 export './utils/fullscreen.dart';
 export './utils.dart';
+export './strategies/video_scale_strategy.dart';
+export './widgets/scale_strategy_dialog.dart';

@@ -29,6 +29,8 @@ import 'widgets/common_btn.dart';
 import 'widgets/control_bar.dart';
 import 'widgets/forward_seek.dart';
 import 'widgets/play_pause_btn.dart';
+import 'widgets/scale_strategy_dialog.dart';
+import 'render/edge_compressed_video.dart';
 
 class PLVideoPlayer extends StatefulWidget {
   const PLVideoPlayer({
@@ -94,6 +96,16 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
 
   // 用于记录上一次全屏切换手势触发时间，避免误触
   DateTime? lastFullScreenToggleTime;
+
+  // 双指缩放与平移手势记录
+  final RxBool _isTwoFingerGesture = false.obs;
+  double _modeStartScale = 1.0;
+  Offset _modeStartOffset = Offset.zero;
+  Offset _modeStartFocalPoint = Offset.zero;
+  double _modeStartSpan = 1.0;
+  String? _singleFingerDragDirection;
+  Offset _singleFingerStartPos = Offset.zero;
+  Offset _singleFingerTotalDelta = Offset.zero;
 
   void onDoubleTapSeekBackward() {
     _mountSeekBackwardButton.value = true;
@@ -370,6 +382,22 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
     return list;
   }
 
+  /// 平移微调按钮：按缩放比例将视频向某方向微调一步
+  Widget _panBtn(BuildContext context, IconData icon, Offset dir) {
+    return InkWell(
+      onTap: () {
+        feedBack();
+        final double step = 16.0 * widget.controller.zoomScale.value;
+        widget.controller.nudgeOffset(Offset(dir.dx * step, dir.dy * step));
+      },
+      borderRadius: BorderRadius.circular(8),
+      child: Padding(
+        padding: const EdgeInsets.all(6),
+        child: Icon(icon, color: Colors.white, size: 18),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final PlPlayerController _ = widget.controller;
@@ -390,20 +418,52 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
     return Stack(
       fit: StackFit.passthrough,
       children: <Widget>[
-        Obx(
-          () => Video(
-            key: ValueKey(_.videoFit.value),
-            controller: videoController,
-            controls: NoVideoControls,
-            alignment: widget.alignment!,
-            pauseUponEnteringBackgroundMode: !enableBackgroundPlay,
-            resumeUponEnteringForegroundMode: true,
-            subtitleViewConfiguration: const SubtitleViewConfiguration(
-              style: subTitleStyle,
-              padding: EdgeInsets.all(24.0),
-            ),
-            fit: _.videoFit.value,
-          ),
+        LayoutBuilder(
+          builder: (context, constraints) {
+            return Obx(
+              () {
+                final double scale = _.zoomScale.value;
+                final Offset offset = _.zoomOffset.value;
+                final bool isNonLinear =
+                    _.scaleStrategy.value.id != 'linear' && scale <= 1.5;
+
+                final Widget videoWidget = Video(
+                  key: ValueKey(_.videoFit.value),
+                  controller: videoController,
+                  controls: NoVideoControls,
+                  alignment: widget.alignment!,
+                  pauseUponEnteringBackgroundMode: !enableBackgroundPlay,
+                  resumeUponEnteringForegroundMode: true,
+                  subtitleViewConfiguration: const SubtitleViewConfiguration(
+                    style: subTitleStyle,
+                    padding: EdgeInsets.all(24.0),
+                  ),
+                  fit: _.videoFit.value,
+                );
+
+                // 线性/回退：保持传统等比缩放 + ClipRect 自然裁切
+                if (!isNonLinear) {
+                  return ClipRect(
+                    child: Transform(
+                      alignment: Alignment.center,
+                      transform: Matrix4.identity()
+                        ..translate(offset.dx, offset.dy)
+                        ..scale(scale),
+                      child: videoWidget,
+                    ),
+                  );
+                }
+
+                // 非线性（方案B）：在 Flutter 管线内做坐标精确的边缘压缩
+                return EdgeCompressedVideo(
+                  rawScale: scale,
+                  offset: offset,
+                  videoAspect: _.getVideoAspectRatio(),
+                  video: videoWidget,
+                );
+              },
+            );
+          },
         ),
 
         /// 长按倍速 toast
@@ -609,100 +669,361 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
               _.setDoubleSpeedStatus(false);
             },
 
-            /// 水平位置 快进 live模式下禁用
-            onHorizontalDragUpdate: (DragUpdateDetails details) {
-              // live模式下禁用 锁定时🔒禁用
-              if (_.videoType == 'live' || _.controlsLock.value) {
-                return;
+            onScaleStart: (ScaleStartDetails details) {
+              if (details.pointerCount >= 2) {
+                _isTwoFingerGesture.value = true;
+                                _modeStartScale = _.zoomScale.value;
+                _modeStartOffset = _.zoomOffset.value;
+                _modeStartFocalPoint = details.localFocalPoint;
+                _modeStartSpan = 1.0;
+                if (_singleFingerDragDirection == 'horizontal') {
+                  _.onChangedSliderEnd();
+                }
+                _singleFingerDragDirection = null;
+              } else {
+                _isTwoFingerGesture.value = false;
+                                _singleFingerDragDirection = null;
+                _singleFingerStartPos = details.localFocalPoint;
+                _singleFingerTotalDelta = Offset.zero;
+                _distance.value = 0.0;
               }
-              // final double tapPosition = details.localPosition.dx;
-              final int curSliderPosition =
-                  _.sliderPosition.value.inMilliseconds;
-              final double scale = 90000 / MediaQuery.sizeOf(context).width;
-              final Duration pos = Duration(
-                  milliseconds:
-                      curSliderPosition + (details.delta.dx * scale).round());
-              final Duration result =
-                  pos.clamp(Duration.zero, _.duration.value);
-              _.onUpdatedSliderProgress(result);
-              _.onChangedSliderStart();
             },
-            onHorizontalDragEnd: (DragEndDetails details) {
-              if (_.videoType == 'live' || _.controlsLock.value) {
-                return;
-              }
-              _.onChangedSliderEnd();
-              _.seekTo(_.sliderPosition.value, type: 'slider');
-            },
-            // 垂直方向 音量/亮度调节
-            onVerticalDragUpdate: (DragUpdateDetails details) async {
-              final double totalWidth = MediaQuery.sizeOf(context).width;
-              final double tapPosition = details.localPosition.dx;
-              final double sectionWidth = totalWidth / 3;
-              final double delta = details.delta.dy;
-
-              /// 锁定时禁用
+            onScaleUpdate: (ScaleUpdateDetails details) async {
               if (_.controlsLock.value) {
                 return;
               }
-              if (lastFullScreenToggleTime != null &&
-                  DateTime.now().difference(lastFullScreenToggleTime!) <
-                      const Duration(milliseconds: 500)) {
+
+              // 双指手势：缩放与平移（互斥判定，平移时缩放比例锁定，缩放时中心随手指动态调整）
+              if (details.pointerCount >= 2) {
+                if (!_isTwoFingerGesture.value) {
+                  _isTwoFingerGesture.value = true;
+                  if (_singleFingerDragDirection == 'horizontal') {
+                    _.onChangedSliderEnd();
+                  }
+                  _singleFingerDragDirection = null;
+                  _modeStartScale = _.zoomScale.value;
+                  _modeStartOffset = _.zoomOffset.value;
+                  _modeStartFocalPoint = details.localFocalPoint;
+                  // details.scale 自手势起始即为相对量（起始=1.0），固定为 1.0 作连续基准
+                  _modeStartSpan = 1.0;
+                  return;
+                }
+
+                // 始终用「焦距锚定」公式连续跟踪：比例跟手、偏移跟手（含垂直方向）。
+                // 不依赖模式判定阻塞，水平/垂直平移与缩放天然都生效；纯平移时间距不变，
+                // 比例自然保持稳定（等同冻结），位移随焦点实时跟手。
+                final Size cSize = context.size ?? const Size(1920, 1080);
+                final Offset center =
+                    Offset(cSize.width / 2.0, cSize.height / 2.0);
+                final Offset fCur = details.localFocalPoint;
+                final Offset fStart = _modeStartFocalPoint;
+                final Offset tStart = _modeStartOffset;
+                final double spanRatio = _modeStartSpan > 0
+                    ? (details.scale / _modeStartSpan)
+                    : 1.0;
+                final double newScale =
+                    (_modeStartScale * spanRatio).clamp(1.0, 4.0);
+                final double ratio = _modeStartScale > 0
+                    ? (newScale / _modeStartScale)
+                    : 1.0;
+                final double newOffsetX = fCur.dx -
+                    center.dx -
+                    ratio * (fStart.dx - center.dx - tStart.dx);
+                final double newOffsetY = fCur.dy -
+                    center.dy -
+                    ratio * (fStart.dy - center.dy - tStart.dy);
+                _.updateZoom(newScale, Offset(newOffsetX, newOffsetY),
+                    containerSize: cSize);
                 return;
               }
-              if (tapPosition < sectionWidth) {
-                // 左边区域 👈
-                final double level = (_.isFullScreen.value
-                        ? Get.size.height
-                        : screenWidth * 9 / 16) *
-                    3;
-                final double brightness =
-                    _brightnessValue.value - delta / level;
-                final double result = brightness.clamp(0.0, 1.0);
-                setBrightness(result);
-              } else if (tapPosition < sectionWidth * 2) {
-                // 全屏
-                final double dy = details.delta.dy;
-                const double threshold = 7.0; // 滑动阈值
-                final bool flag =
-                    fullScreenGestureMode != FullScreenGestureMode.values.last;
-                if (dy > _distance.value &&
-                    dy > threshold &&
-                    !_.controlsLock.value) {
-                  if (_.isFullScreen.value ^ flag) {
-                    lastFullScreenToggleTime = DateTime.now();
-                    // 下滑退出全屏
-                    await widget.controller.triggerFullScreen(status: flag);
+
+              // 双指手势过程中抬起一指时，不触发任何单指操作
+              if (_isTwoFingerGesture.value) {
+                return;
+              }
+
+              // 单指手势：根据初始滑动方向锁定为水平（进度快进）或垂直（亮度/音量/全屏）
+              if (_singleFingerDragDirection == null) {
+                _singleFingerTotalDelta += details.focalPointDelta;
+                const double threshold = 8.0;
+                if (_singleFingerTotalDelta.dx.abs() > threshold ||
+                    _singleFingerTotalDelta.dy.abs() > threshold) {
+                  if (_singleFingerTotalDelta.dx.abs() >=
+                      _singleFingerTotalDelta.dy.abs()) {
+                    _singleFingerDragDirection = 'horizontal';
+                  } else {
+                    _singleFingerDragDirection = 'vertical';
                   }
-                  _distance.value = 0.0;
-                } else if (dy < _distance.value &&
-                    dy < -threshold &&
-                    !_.controlsLock.value) {
-                  if (!_.isFullScreen.value ^ flag) {
-                    lastFullScreenToggleTime = DateTime.now();
-                    // 上滑进入全屏
-                    await widget.controller.triggerFullScreen(status: !flag);
-                  }
-                  _distance.value = 0.0;
                 }
-                _distance.value = dy;
-              } else {
-                // 右边区域 👈
-                EasyThrottle.throttle(
-                    'setVolume', const Duration(milliseconds: 20), () {
+              }
+
+              if (_singleFingerDragDirection == 'horizontal') {
+                if (_.videoType == 'live') {
+                  return;
+                }
+                final int curSliderPosition =
+                    _.sliderPosition.value.inMilliseconds;
+                final double scale = 90000 / MediaQuery.sizeOf(context).width;
+                final Duration pos = Duration(
+                    milliseconds: curSliderPosition +
+                        (details.focalPointDelta.dx * scale).round());
+                final Duration result =
+                    pos.clamp(Duration.zero, _.duration.value);
+                _.onUpdatedSliderProgress(result);
+                _.onChangedSliderStart();
+              } else if (_singleFingerDragDirection == 'vertical') {
+                final double totalWidth = MediaQuery.sizeOf(context).width;
+                final double tapPosition = _singleFingerStartPos.dx;
+                final double sectionWidth = totalWidth / 3;
+                final double delta = details.focalPointDelta.dy;
+
+                if (lastFullScreenToggleTime != null &&
+                    DateTime.now().difference(lastFullScreenToggleTime!) <
+                        const Duration(milliseconds: 500)) {
+                  return;
+                }
+                if (tapPosition < sectionWidth) {
+                  // 左边区域 👈 亮度
                   final double level = (_.isFullScreen.value
-                      ? Get.size.height
-                      : screenWidth * 9 / 16);
-                  final double volume = _volumeValue.value -
-                      double.parse(delta.toStringAsFixed(1)) / level;
-                  final double result = volume.clamp(0.0, 1.0);
-                  setVolume(result);
-                });
+                          ? Get.size.height
+                          : screenWidth * 9 / 16) *
+                      3;
+                  final double brightness =
+                      _brightnessValue.value - delta / level;
+                  final double result = brightness.clamp(0.0, 1.0);
+                  setBrightness(result);
+                } else if (tapPosition < sectionWidth * 2) {
+                  // 全屏
+                  final double dy = details.focalPointDelta.dy;
+                  const double threshold = 7.0; // 滑动阈值
+                  final bool flag =
+                      fullScreenGestureMode != FullScreenGestureMode.values.last;
+                  if (dy > _distance.value &&
+                      dy > threshold &&
+                      !_.controlsLock.value) {
+                    if (_.isFullScreen.value ^ flag) {
+                      lastFullScreenToggleTime = DateTime.now();
+                      // 下滑退出全屏
+                      await widget.controller.triggerFullScreen(status: flag);
+                    }
+                    _distance.value = 0.0;
+                  } else if (dy < _distance.value &&
+                      dy < -threshold &&
+                      !_.controlsLock.value) {
+                    if (!_.isFullScreen.value ^ flag) {
+                      lastFullScreenToggleTime = DateTime.now();
+                      // 上滑进入全屏
+                      await widget.controller.triggerFullScreen(status: !flag);
+                    }
+                    _distance.value = 0.0;
+                  }
+                  _distance.value = dy;
+                } else {
+                  // 右边区域 👈 音量
+                  EasyThrottle.throttle(
+                      'setVolume', const Duration(milliseconds: 20), () {
+                    final double level = (_.isFullScreen.value
+                        ? Get.size.height
+                        : screenWidth * 9 / 16);
+                    final double volume = _volumeValue.value -
+                        double.parse(delta.toStringAsFixed(1)) / level;
+                    final double result = volume.clamp(0.0, 1.0);
+                    setVolume(result);
+                  });
+                }
               }
             },
-            onVerticalDragEnd: (DragEndDetails details) {},
+            onScaleEnd: (ScaleEndDetails details) {
+              if (_isTwoFingerGesture.value) {
+                _isTwoFingerGesture.value = false;
+                final Size cSize = context.size ?? const Size(1920, 1080);
+                _.onZoomEnd(containerSize: cSize);
+              } else if (_singleFingerDragDirection == 'horizontal') {
+                if (_.videoType != 'live' && !_.controlsLock.value) {
+                  _.onChangedSliderEnd();
+                  _.seekTo(_.sliderPosition.value, type: 'slider');
+                }
+              }
+              _singleFingerDragDirection = null;
+              _singleFingerTotalDelta = Offset.zero;
+              _distance.value = 0.0;
+            },
           ),
         ),
+
+        /// 画面缩放状态与复位/算法控制条
+        Obx(() {
+          if (!_.isZoomed.value) return const SizedBox();
+          return Positioned(
+            top: 50,
+            right: 16,
+            child: Material(
+              color: Colors.transparent,
+              child: Container(
+                decoration: BoxDecoration(
+                  color: Colors.black.withOpacity(0.68),
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(
+                    color: Colors.white.withOpacity(0.25),
+                    width: 0.8,
+                  ),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    InkWell(
+                      onTap: () {
+                        feedBack();
+                        _.resetZoom();
+                      },
+                      borderRadius: const BorderRadius.horizontal(
+                        left: Radius.circular(20),
+                        right: Radius.circular(0),
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 5),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(
+                              Icons.restart_alt_rounded,
+                              color: Colors.white,
+                              size: 15,
+                            ),
+                            const SizedBox(width: 4),
+                            Text(
+                              '${_.zoomScale.value.toStringAsFixed(1)}x 复位',
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    Container(
+                      width: 1,
+                      height: 14,
+                      color: Colors.white.withOpacity(0.3),
+                    ),
+                    InkWell(
+                      onTap: () {
+                        feedBack();
+                        _.autoFitZoom();
+                      },
+                      child: const Padding(
+                        padding: EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 5),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              Icons.fit_screen_rounded,
+                              color: Colors.white,
+                              size: 15,
+                            ),
+                            SizedBox(width: 4),
+                            Text(
+                              '自动',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    Container(
+                      width: 1,
+                      height: 14,
+                      color: Colors.white.withOpacity(0.3),
+                    ),
+                    InkWell(
+                      onTap: () {
+                        feedBack();
+                        showScaleStrategyDialog(context, _);
+                      },
+                      borderRadius: const BorderRadius.horizontal(
+                        left: Radius.circular(0),
+                        right: Radius.circular(20),
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 5),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              _.scaleStrategy.value.name.split(' ')[0],
+                              style: TextStyle(
+                                color: Theme.of(context).colorScheme.primary,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                            const SizedBox(width: 2),
+                            const Icon(
+                              Icons.tune_rounded,
+                              color: Colors.white70,
+                              size: 13,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        }),
+
+        /// 平移精确微调（上下左右）：手指难以精确平移时的补充
+        Obx(() {
+          if (!_.isZoomed.value) return const SizedBox();
+          return Positioned(
+            top: 112,
+            right: 16,
+            child: Material(
+              color: Colors.transparent,
+              child: Container(
+                width: 40,
+                padding: const EdgeInsets.all(4),
+                decoration: BoxDecoration(
+                  color: Colors.black.withOpacity(0.68),
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(
+                    color: Colors.white.withOpacity(0.25),
+                    width: 0.8,
+                  ),
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _panBtn(context, Icons.keyboard_arrow_up, const Offset(0, -1)),
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        _panBtn(
+                            context, Icons.keyboard_arrow_left, const Offset(-1, 0)),
+                        const SizedBox(width: 4, height: 4),
+                        _panBtn(
+                            context, Icons.keyboard_arrow_right, const Offset(1, 0)),
+                      ],
+                    ),
+                    _panBtn(
+                        context, Icons.keyboard_arrow_down, const Offset(0, 1)),
+                  ],
+                ),
+              ),
+            ),
+          );
+        }),
 
         // 头部、底部控制条
         Obx(
